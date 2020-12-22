@@ -1,43 +1,43 @@
-from typing import Tuple, Dict, List
-import logging
 import json
+import logging
+from typing import Dict, List, Tuple
 
 from kloppy.domain import (
-    EventDataset,
-    Team,
-    Period,
-    Point,
+    BallOutEvent,
     BallState,
-    DatasetFlag,
-    Orientation,
-    Provider,
-    PitchDimensions,
-    Dimension,
-    PassEvent,
-    ShotEvent,
-    TakeOnEvent,
-    CarryEvent,
-    GenericEvent,
-    PassResult,
-    ShotResult,
-    TakeOnResult,
-    CarryResult,
-    EventType,
-    Metadata,
-    Ground,
-    Player,
-    SubstitutionEvent,
     CardEvent,
-    PlayerOnEvent,
-    PlayerOffEvent,
     CardType,
+    CarryEvent,
+    CarryResult,
+    DatasetFlag,
+    Dimension,
+    Event,
+    EventDataset,
+    EventType,
+    FoulCommittedEvent,
+    GenericEvent,
+    Ground,
+    Metadata,
+    Orientation,
+    PassEvent,
+    PassResult,
+    Period,
+    PitchDimensions,
+    Player,
+    PlayerOffEvent,
+    PlayerOnEvent,
+    Point,
+    Provider,
     Qualifier,
+    RecoveryEvent,
     SetPieceQualifier,
     SetPieceType,
-    RecoveryEvent,
-    FoulCommittedEvent,
-    BallOutEvent,
-    Event,
+    ShotEvent,
+    ShotResult,
+    SubstitutionEvent,
+    TakeOnEvent,
+    TakeOnResult,
+    Team,
 )
 from kloppy.infra.serializers.event import EventDataSerializer
 from kloppy.utils import Readable, performance_logging
@@ -272,333 +272,333 @@ def _include_event(event: Event, wanted_event_types: List) -> bool:
 
 
 class StatsBombSerializer(EventDataSerializer):
-    @staticmethod
-    def __validate_inputs(inputs: Dict[str, Readable]):
+    """
+    Deserialize StatsBomb event data into a `EventDataset`.
+
+    Parameters
+    ----------
+    inputs : dict
+        input `event_data` should point to a `Readable` object containing
+        the 'json' formatted event data. input `lineup_data` should point
+        to a `Readable` object containing the 'json' formatted lineup data.
+    options : dict
+        Options for deserialization of the StatsBomb file. Possible options are
+        `event_types` (list of event types) to specify the event types that
+        should be returned. Valid types: "shot", "pass", "carry", "take_on" and
+        "generic". Generic is everything other than the first 4. Those events
+        are barely parsed. This type of event can be used to do the parsing
+        yourself.
+        Every event has a 'raw_event' attribute which contains the original
+        dictionary.
+    Returns
+    -------
+    dataset : EventDataset
+    Raises
+    ------
+
+    See Also
+    --------
+
+    Examples
+    --------
+    >>> serializer = StatsBombSerializer()
+    >>> with open("events/12312312.json", "rb") as event_data, \
+    >>>      open("lineups/123123123.json", "rb") as lineup_data:
+    >>>
+    >>>     dataset = serializer.deserialize(
+    >>>         inputs={
+    >>>             'event_data': event_data,
+    >>>             'lineup_data': lineup_data
+    >>>         },
+    >>>         options={
+    >>>             'event_types': ["pass", "take_on", "carry", "shot"]
+    >>>         }
+    >>>     )
+    """
+
+    def _validate_inputs(self, inputs: Dict[str, Readable]):
         if "event_data" not in inputs:
             raise ValueError("Please specify a value for input 'event_data'")
         if "lineup_data" not in inputs:
             raise ValueError("Please specify a value for input 'lineup_data'")
 
-    def deserialize(
-        self, inputs: Dict[str, Readable], options: Dict = None
+    def _load_raw_events(
+        self, inputs: Dict[str, Readable], options: Dict
+    ) -> Tuple:
+        raw_events = json.load(inputs["event_data"])
+        home_lineup, away_lineup = json.load(inputs["lineup_data"])
+        (
+            shot_fidelity_version,
+            xy_fidelity_version,
+        ) = _determine_xy_fidelity_versions(raw_events)
+        logger.info(
+            f"Determined Fidelity versions: shot v{shot_fidelity_version} / XY v{xy_fidelity_version}"
+        )
+        return (
+            raw_events,
+            home_lineup,
+            away_lineup,
+            shot_fidelity_version,
+            xy_fidelity_version,
+        )
+
+    def _parse_raw_events(
+        self, raw_events: Tuple, options: Dict
     ) -> EventDataset:
-        """
-                Deserialize StatsBomb event data into a `EventDataset`.
+        (
+            raw_events,
+            home_lineup,
+            away_lineup,
+            shot_fidelity_version,
+            xy_fidelity_version,
+        ) = raw_events
 
-                Parameters
-                ----------
-                inputs : dict
-                    input `event_data` should point to a `Readable` object containing
-                    the 'json' formatted event data. input `lineup_data` should point
-                    to a `Readable` object containing the 'json' formatted lineup data.
-                options : dict
-                    Options for deserialization of the StatsBomb file. Possible options are
-                    `event_types` (list of event types) to specify the event types that
-                    should be returned. Valid types: "shot", "pass", "carry", "take_on" and
-                    "generic". Generic is everything other than the first 4. Those events
-                    are barely parsed. This type of event can be used to do the parsing
-                    yourself.
-                    Every event has a 'raw_event' attribute which contains the original
-                    dictionary.
-                Returns
-                -------
-                dataset : EventDataset
-                Raises
-                ------
-
-                See Also
-                --------
-
-                Examples
-                --------
-                >>> serializer = StatsBombSerializer()
-                >>> with open("events/12312312.json", "rb") as event_data, \
-                >>>      open("lineups/123123123.json", "rb") as lineup_data:
-                >>>
-                >>>     dataset = serializer.deserialize(
-                >>>         inputs={
-                >>>             'event_data': event_data,
-                >>>             'lineup_data': lineup_data
-                >>>         },
-                >>>         options={
-                >>>             'event_types': ["pass", "take_on", "carry", "shot"]
-                >>>         }
-                >>>     )
-                """
-        self.__validate_inputs(inputs)
-        if not options:
-            options = {}
-
-        with performance_logging("load data", logger=logger):
-            raw_events = json.load(inputs["event_data"])
-            home_lineup, away_lineup = json.load(inputs["lineup_data"])
-            (
-                shot_fidelity_version,
-                xy_fidelity_version,
-            ) = _determine_xy_fidelity_versions(raw_events)
-            logger.info(
-                f"Determined Fidelity versions: shot v{shot_fidelity_version} / XY v{xy_fidelity_version}"
+        starting_player_ids = {
+            str(player["player"]["id"])
+            for raw_event in raw_events
+            if raw_event["type"]["id"] == SB_EVENT_TYPE_STARTING_XI
+            for player in raw_event["tactics"]["lineup"]
+        }
+        home_team = Team(
+            team_id=str(home_lineup["team_id"]),
+            name=home_lineup["team_name"],
+            ground=Ground.HOME,
+        )
+        home_team.players = [
+            Player(
+                player_id=str(player["player_id"]),
+                team=home_team,
+                name=player["player_name"],
+                jersey_no=int(player["jersey_number"]),
+                starting=str(player["player_id"]) in starting_player_ids,
             )
+            for player in home_lineup["lineup"]
+        ]
 
-        with performance_logging("parse data", logger=logger):
-            starting_player_ids = {
-                str(player["player"]["id"])
-                for raw_event in raw_events
-                if raw_event["type"]["id"] == SB_EVENT_TYPE_STARTING_XI
-                for player in raw_event["tactics"]["lineup"]
-            }
-            home_team = Team(
-                team_id=str(home_lineup["team_id"]),
-                name=home_lineup["team_name"],
-                ground=Ground.HOME,
+        away_team = Team(
+            team_id=str(away_lineup["team_id"]),
+            name=away_lineup["team_name"],
+            ground=Ground.AWAY,
+        )
+        away_team.players = [
+            Player(
+                player_id=str(player["player_id"]),
+                team=away_team,
+                name=player["player_name"],
+                jersey_no=int(player["jersey_number"]),
+                starting=str(player["player_id"]) in starting_player_ids,
             )
-            home_team.players = [
-                Player(
-                    player_id=str(player["player_id"]),
-                    team=home_team,
-                    name=player["player_name"],
-                    jersey_no=int(player["jersey_number"]),
-                    starting=str(player["player_id"]) in starting_player_ids,
+            for player in away_lineup["lineup"]
+        ]
+
+        teams = [home_team, away_team]
+
+        wanted_event_types = [
+            EventType[event_type.upper()]
+            for event_type in options.get("event_types", [])
+        ]
+
+        periods = []
+        period = None
+        events = []
+        for raw_event in raw_events:
+            if raw_event["team"]["id"] == home_lineup["team_id"]:
+                team = teams[0]
+            elif raw_event["team"]["id"] == away_lineup["team_id"]:
+                team = teams[1]
+            else:
+                raise Exception(f"Unknown team_id {raw_event['team']['id']}")
+
+            if raw_event["possession_team"]["id"] == home_lineup["team_id"]:
+                possession_team = teams[0]
+            elif raw_event["possession_team"]["id"] == away_lineup["team_id"]:
+                possession_team = teams[1]
+            else:
+                raise Exception(
+                    f"Unknown possession_team_id: {raw_event['possession_team']}"
                 )
-                for player in home_lineup["lineup"]
-            ]
 
-            away_team = Team(
-                team_id=str(away_lineup["team_id"]),
-                name=away_lineup["team_name"],
-                ground=Ground.AWAY,
-            )
-            away_team.players = [
-                Player(
-                    player_id=str(player["player_id"]),
-                    team=away_team,
-                    name=player["player_name"],
-                    jersey_no=int(player["jersey_number"]),
-                    starting=str(player["player_id"]) in starting_player_ids,
-                )
-                for player in away_lineup["lineup"]
-            ]
-
-            teams = [home_team, away_team]
-
-            wanted_event_types = [
-                EventType[event_type.upper()]
-                for event_type in options.get("event_types", [])
-            ]
-
-            periods = []
-            period = None
-            events = []
-            for raw_event in raw_events:
-                if raw_event["team"]["id"] == home_lineup["team_id"]:
-                    team = teams[0]
-                elif raw_event["team"]["id"] == away_lineup["team_id"]:
-                    team = teams[1]
-                else:
-                    raise Exception(
-                        f"Unknown team_id {raw_event['team']['id']}"
-                    )
-
-                if (
-                    raw_event["possession_team"]["id"]
-                    == home_lineup["team_id"]
-                ):
-                    possession_team = teams[0]
-                elif (
-                    raw_event["possession_team"]["id"]
-                    == away_lineup["team_id"]
-                ):
-                    possession_team = teams[1]
-                else:
-                    raise Exception(
-                        f"Unknown possession_team_id: {raw_event['possession_team']}"
-                    )
-
-                timestamp = parse_str_ts(raw_event["timestamp"])
-                period_id = int(raw_event["period"])
-                if not period or period.id != period_id:
-                    period = Period(
-                        id=period_id,
-                        start_timestamp=(
-                            timestamp
-                            if not period
-                            # period = [start, end], add millisecond to prevent overlapping
-                            else timestamp + period.end_timestamp + 0.001
-                        ),
-                        end_timestamp=None,
-                    )
-                    periods.append(period)
-                else:
-                    period.end_timestamp = period.start_timestamp + timestamp
-
-                player = None
-                if "player" in raw_event:
-                    player = team.get_player_by_id(raw_event["player"]["id"])
-
-                event_type = raw_event["type"]["id"]
-                if event_type == SB_EVENT_TYPE_SHOT:
-                    fidelity_version = shot_fidelity_version
-                elif event_type in (
-                    SB_EVENT_TYPE_CARRY,
-                    SB_EVENT_TYPE_DRIBBLE,
-                    SB_EVENT_TYPE_PASS,
-                ):
-                    fidelity_version = xy_fidelity_version
-                else:
-                    # TODO: Uh ohhhh.. don't know which one to pick
-                    fidelity_version = xy_fidelity_version
-
-                generic_event_kwargs = dict(
-                    # from DataRecord
-                    period=period,
-                    timestamp=timestamp,
-                    ball_owning_team=possession_team,
-                    ball_state=BallState.ALIVE,
-                    # from Event
-                    event_id=raw_event["id"],
-                    team=team,
-                    player=player,
-                    coordinates=(
-                        _parse_coordinates(
-                            raw_event.get("location"), fidelity_version
-                        )
-                        if "location" in raw_event
-                        else None
+            timestamp = parse_str_ts(raw_event["timestamp"])
+            period_id = int(raw_event["period"])
+            if not period or period.id != period_id:
+                period = Period(
+                    id=period_id,
+                    start_timestamp=(
+                        timestamp
+                        if not period
+                        # period = [start, end], add millisecond to prevent overlapping
+                        else timestamp + period.end_timestamp + 0.001
                     ),
-                    raw_event=raw_event,
+                    end_timestamp=None,
+                )
+                periods.append(period)
+            else:
+                period.end_timestamp = period.start_timestamp + timestamp
+
+            player = None
+            if "player" in raw_event:
+                player = team.get_player_by_id(raw_event["player"]["id"])
+
+            event_type = raw_event["type"]["id"]
+            if event_type == SB_EVENT_TYPE_SHOT:
+                fidelity_version = shot_fidelity_version
+            elif event_type in (
+                SB_EVENT_TYPE_CARRY,
+                SB_EVENT_TYPE_DRIBBLE,
+                SB_EVENT_TYPE_PASS,
+            ):
+                fidelity_version = xy_fidelity_version
+            else:
+                # TODO: Uh ohhhh.. don't know which one to pick
+                fidelity_version = xy_fidelity_version
+
+            generic_event_kwargs = dict(
+                # from DataRecord
+                period=period,
+                timestamp=timestamp,
+                ball_owning_team=possession_team,
+                ball_state=BallState.ALIVE,
+                # from Event
+                event_id=raw_event["id"],
+                team=team,
+                player=player,
+                coordinates=(
+                    _parse_coordinates(
+                        raw_event.get("location"), fidelity_version
+                    )
+                    if "location" in raw_event
+                    else None
+                ),
+                raw_event=raw_event,
+            )
+
+            if event_type == SB_EVENT_TYPE_PASS:
+                pass_event_kwargs = _parse_pass(
+                    pass_dict=raw_event["pass"],
+                    team=team,
+                    fidelity_version=fidelity_version,
                 )
 
-                if event_type == SB_EVENT_TYPE_PASS:
-                    pass_event_kwargs = _parse_pass(
-                        pass_dict=raw_event["pass"],
-                        team=team,
-                        fidelity_version=fidelity_version,
-                    )
+                event = PassEvent.create(
+                    # TODO: Consider moving this to _parse_pass
+                    receive_timestamp=timestamp + raw_event["duration"],
+                    **pass_event_kwargs,
+                    **generic_event_kwargs,
+                )
+            elif event_type == SB_EVENT_TYPE_SHOT:
+                shot_event_kwargs = _parse_shot(shot_dict=raw_event["shot"])
+                event = ShotEvent.create(
+                    **shot_event_kwargs, **generic_event_kwargs
+                )
 
-                    event = PassEvent.create(
-                        # TODO: Consider moving this to _parse_pass
-                        receive_timestamp=timestamp + raw_event["duration"],
-                        **pass_event_kwargs,
-                        **generic_event_kwargs,
-                    )
-                elif event_type == SB_EVENT_TYPE_SHOT:
-                    shot_event_kwargs = _parse_shot(
-                        shot_dict=raw_event["shot"]
-                    )
-                    event = ShotEvent.create(
-                        **shot_event_kwargs, **generic_event_kwargs
-                    )
+            # For dribble and carry the definitions
+            # are flipped between Statsbomb and kloppy
+            elif event_type == SB_EVENT_TYPE_DRIBBLE:
+                take_on_event_kwargs = _parse_take_on(
+                    take_on_dict=raw_event["dribble"]
+                )
+                event = TakeOnEvent.create(
+                    qualifiers=None,
+                    **take_on_event_kwargs,
+                    **generic_event_kwargs,
+                )
+            elif event_type == SB_EVENT_TYPE_CARRY:
+                carry_event_kwargs = _parse_carry(
+                    carry_dict=raw_event["carry"],
+                    fidelity_version=fidelity_version,
+                )
+                event = CarryEvent.create(
+                    qualifiers=None,
+                    # TODO: Consider moving this to _parse_carry
+                    end_timestamp=timestamp + raw_event["duration"],
+                    **carry_event_kwargs,
+                    **generic_event_kwargs,
+                )
 
-                # For dribble and carry the definitions
-                # are flipped between Statsbomb and kloppy
-                elif event_type == SB_EVENT_TYPE_DRIBBLE:
-                    take_on_event_kwargs = _parse_take_on(
-                        take_on_dict=raw_event["dribble"]
-                    )
-                    event = TakeOnEvent.create(
-                        qualifiers=None,
-                        **take_on_event_kwargs,
-                        **generic_event_kwargs,
-                    )
-                elif event_type == SB_EVENT_TYPE_CARRY:
-                    carry_event_kwargs = _parse_carry(
-                        carry_dict=raw_event["carry"],
-                        fidelity_version=fidelity_version,
-                    )
-                    event = CarryEvent.create(
-                        qualifiers=None,
-                        # TODO: Consider moving this to _parse_carry
-                        end_timestamp=timestamp + raw_event["duration"],
-                        **carry_event_kwargs,
-                        **generic_event_kwargs,
-                    )
-
-                    # lineup affecting events
-                elif event_type == SB_EVENT_TYPE_SUBSTITUTION:
-                    substitution_event_kwargs = _parse_substitution(
-                        substitution_dict=raw_event["substitution"], team=team
-                    )
-                    event = SubstitutionEvent.create(
+                # lineup affecting events
+            elif event_type == SB_EVENT_TYPE_SUBSTITUTION:
+                substitution_event_kwargs = _parse_substitution(
+                    substitution_dict=raw_event["substitution"], team=team
+                )
+                event = SubstitutionEvent.create(
+                    result=None,
+                    qualifiers=None,
+                    **substitution_event_kwargs,
+                    **generic_event_kwargs,
+                )
+            elif event_type == SB_EVENT_TYPE_BAD_BEHAVIOUR:
+                card_kwargs = _parse_card(
+                    card_containing_dict=raw_event.get("bad_behaviour", {})
+                )
+                if card_kwargs["card_type"]:
+                    event = CardEvent.create(
                         result=None,
                         qualifiers=None,
-                        **substitution_event_kwargs,
+                        card_type=card_kwargs["card_type"],
                         **generic_event_kwargs,
                     )
-                elif event_type == SB_EVENT_TYPE_BAD_BEHAVIOUR:
-                    card_kwargs = _parse_card(
-                        card_containing_dict=raw_event.get("bad_behaviour", {})
+            elif event_type == SB_EVENT_TYPE_FOUL_COMMITTED:
+                card_kwargs = _parse_card(
+                    card_containing_dict=raw_event.get("foul_committed", {})
+                )
+                if card_kwargs["card_type"]:
+                    event = CardEvent.create(
+                        result=None,
+                        qualifiers=None,
+                        card_type=card_kwargs["card_type"],
+                        **generic_event_kwargs,
                     )
-                    if card_kwargs["card_type"]:
-                        event = CardEvent.create(
-                            result=None,
-                            qualifiers=None,
-                            card_type=card_kwargs["card_type"],
-                            **generic_event_kwargs,
-                        )
-                elif event_type == SB_EVENT_TYPE_FOUL_COMMITTED:
-                    card_kwargs = _parse_card(
-                        card_containing_dict=raw_event.get(
-                            "foul_committed", {}
-                        )
-                    )
-                    if card_kwargs["card_type"]:
-                        event = CardEvent.create(
-                            result=None,
-                            qualifiers=None,
-                            card_type=card_kwargs["card_type"],
-                            **generic_event_kwargs,
-                        )
-                elif event_type == SB_EVENT_TYPE_PLAYER_ON:
-                    event = PlayerOnEvent.create(
-                        result=None, qualifiers=None, **generic_event_kwargs
-                    )
-                elif event_type == SB_EVENT_TYPE_PLAYER_OFF:
-                    event = PlayerOffEvent.create(
-                        result=None, qualifiers=None, **generic_event_kwargs
-                    )
+            elif event_type == SB_EVENT_TYPE_PLAYER_ON:
+                event = PlayerOnEvent.create(
+                    result=None, qualifiers=None, **generic_event_kwargs
+                )
+            elif event_type == SB_EVENT_TYPE_PLAYER_OFF:
+                event = PlayerOffEvent.create(
+                    result=None, qualifiers=None, **generic_event_kwargs
+                )
 
-                elif event_type == SB_EVENT_TYPE_RECOVERY:
-                    event = RecoveryEvent.create(
+            elif event_type == SB_EVENT_TYPE_RECOVERY:
+                event = RecoveryEvent.create(
+                    result=None,
+                    qualifiers=None,
+                    **generic_event_kwargs,
+                )
+
+            elif event_type == SB_EVENT_TYPE_FOUL_COMMITTED:
+                event = FoulCommittedEvent.create(
+                    result=None,
+                    qualifiers=None,
+                    **generic_event_kwargs,
+                )
+
+            # rest: generic
+            else:
+                event = GenericEvent.create(
+                    result=None,
+                    qualifiers=None,
+                    event_name=raw_event["type"]["name"],
+                    **generic_event_kwargs,
+                )
+
+            if _include_event(event, wanted_event_types):
+                events.append(event)
+
+            # Checks if the event ended out of the field and adds a synthetic out event
+            if event.result in OUT_EVENT_RESULTS:
+                generic_event_kwargs["ball_state"] = BallState.DEAD
+                if event.receiver_coordinates:
+                    generic_event_kwargs[
+                        "coordinates"
+                    ] = event.receiver_coordinates
+
+                    event = BallOutEvent.create(
                         result=None,
                         qualifiers=None,
                         **generic_event_kwargs,
                     )
 
-                elif event_type == SB_EVENT_TYPE_FOUL_COMMITTED:
-                    event = FoulCommittedEvent.create(
-                        result=None,
-                        qualifiers=None,
-                        **generic_event_kwargs,
-                    )
-
-                # rest: generic
-                else:
-                    event = GenericEvent.create(
-                        result=None,
-                        qualifiers=None,
-                        event_name=raw_event["type"]["name"],
-                        **generic_event_kwargs,
-                    )
-
-                if _include_event(event, wanted_event_types):
-                    events.append(event)
-
-                # Checks if the event ended out of the field and adds a synthetic out event
-                if event.result in OUT_EVENT_RESULTS:
-                    generic_event_kwargs["ball_state"] = BallState.DEAD
-                    if event.receiver_coordinates:
-                        generic_event_kwargs[
-                            "coordinates"
-                        ] = event.receiver_coordinates
-
-                        event = BallOutEvent.create(
-                            result=None,
-                            qualifiers=None,
-                            **generic_event_kwargs,
-                        )
-
-                        if _include_event(event, wanted_event_types):
-                            events.append(event)
+                    if _include_event(event, wanted_event_types):
+                        events.append(event)
 
         metadata = Metadata(
             teams=teams,
