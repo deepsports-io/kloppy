@@ -1,6 +1,5 @@
 import os
 
-import requests
 from kloppy.infra.serializers.event.wyscout.serializer import WyscoutSerializer
 
 

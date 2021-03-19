@@ -97,6 +97,9 @@ class Transformer:
         )
 
     def transform_event(self, event: Event) -> Event:
+        if not event.team:
+            return event
+
         flip = self.__needs_flip(
             ball_owning_team=event.ball_owning_team,
             attacking_direction=event.period.attacking_direction,

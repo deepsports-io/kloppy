@@ -1,45 +1,51 @@
-from collections import OrderedDict
-from typing import Tuple, Dict, List
 import logging
-from dateutil.parser import parse
-from lxml import objectify
+from collections import OrderedDict
+from typing import Dict, List, Tuple
 
+from dateutil.parser import parse
 from kloppy.domain import (
-    EventDataset,
-    Team,
-    Period,
-    Point,
-    BallState,
-    DatasetFlag,
-    Orientation,
-    PitchDimensions,
-    Dimension,
-    PassEvent,
-    ShotEvent,
-    GenericEvent,
-    PassResult,
-    ShotResult,
-    EventType,
-    Ground,
-    Score,
-    Provider,
-    Metadata,
-    Player,
-    Position,
-    Event,
-    SetPieceQualifier,
-    SetPieceType,
-    Qualifier,
+    AttackingDirection,
     BallOutEvent,
-    RecoveryEvent,
-    SubstitutionEvent,
+    BallState,
+    BodyPart,
+    BodyPartQualifier,
     CardEvent,
     CardType,
+    CounterAttackQualifier,
+    DatasetFlag,
+    Dimension,
+    Event,
+    EventDataset,
+    EventType,
     FoulCommittedEvent,
-    AttackingDirection,
+    GenericEvent,
+    Ground,
+    Metadata,
+    Orientation,
+    PassEvent,
+    PassQualifier,
+    PassResult,
+    PassType,
+    Period,
+    PitchDimensions,
+    Player,
+    Point,
+    Position,
+    Provider,
+    Qualifier,
+    RecoveryEvent,
+    Score,
+    SetPieceQualifier,
+    SetPieceType,
+    ShotEvent,
+    ShotResult,
+    SubstitutionEvent,
+    Team,
 )
-from kloppy.infra.serializers.event import EventDataSerializer
+from kloppy.domain.models import event
+from kloppy.infra.serializers.event import EventDataSerializer, Reader
 from kloppy.utils import Readable, performance_logging
+from lxml import objectify
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +100,7 @@ SPORTEC_EVENT_NAME_SHOT_BLOCKED = "BlockedShot"
 SPORTEC_EVENT_NAME_SHOT_WOODWORK = "ShotWoodWork"
 SPORTEC_EVENT_NAME_SHOT_OTHER = "OtherShot"
 SPORTEC_EVENT_NAME_SHOT_GOAL = "SuccessfulShot"
+SPORTEC_EVENT_NAME_SHOT_AT_GOAL = "ShotAtGoal"
 SPORTEC_SHOT_EVENT_NAMES = (
     SPORTEC_EVENT_NAME_SHOT_WIDE,
     SPORTEC_EVENT_NAME_SHOT_SAVED,
@@ -111,11 +118,20 @@ SPORTEC_EVENT_NAME_PENALTY = "Penalty"
 SPORTEC_EVENT_NAME_CORNER_KICK = "CornerKick"
 SPORTEC_EVENT_NAME_FREE_KICK = "FreeKick"
 SPORTEC_PASS_EVENT_NAMES = (SPORTEC_EVENT_NAME_PASS, SPORTEC_EVENT_NAME_CROSS)
+SPORTEC_EVENT_NAME_PLAY = "Play"
 
 SPORTEC_EVENT_NAME_BALL_CLAIMING = "BallClaiming"
 SPORTEC_EVENT_NAME_SUBSTITUTION = "Substitution"
 SPORTEC_EVENT_NAME_CAUTION = "Caution"
 SPORTEC_EVENT_NAME_FOUL = "Foul"
+
+SPORTEC_BODY_PART_LEFT_LEG = "leftLeg"
+SPORTEC_BODY_PART_RIGHT_LEG = "rightLeg"
+SPORTEC_BODY_PART_HEAD = "head"
+SPORTEC_BODY_PART_UPPER_BODY = "upperBody"
+
+DEFAULT_X_PITCH = 105
+DEFAULT_Y_PITCH = 68
 
 
 def _parse_datetime(dt_str: str) -> float:
@@ -126,6 +142,7 @@ def _get_event_qualifiers(event_chain: Dict) -> List[Qualifier]:
     qualifiers = []
     if SPORTEC_EVENT_NAME_THROW_IN in event_chain:
         qualifiers.append(SetPieceQualifier(value=SetPieceType.THROW_IN))
+        qualifiers.append(PassQualifier(value=PassType.HAND_PASS))
     elif SPORTEC_EVENT_NAME_GOAL_KICK in event_chain:
         qualifiers.append(SetPieceQualifier(value=SetPieceType.GOAL_KICK))
     elif SPORTEC_EVENT_NAME_PENALTY in event_chain:
@@ -136,6 +153,40 @@ def _get_event_qualifiers(event_chain: Dict) -> List[Qualifier]:
         qualifiers.append(SetPieceQualifier(value=SetPieceType.KICK_OFF))
     elif SPORTEC_EVENT_NAME_FREE_KICK in event_chain:
         qualifiers.append(SetPieceQualifier(value=SetPieceType.FREE_KICK))
+    return qualifiers
+
+
+def _get_shot_qualifiers(event_chain: Dict) -> List[Qualifier]:
+    qualifiers = []
+    if (
+        event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]["TypeOfShot"]
+        == SPORTEC_BODY_PART_LEFT_LEG
+    ):
+        qualifiers.append(BodyPartQualifier(value=BodyPart.LEFT_FOOT))
+    elif (
+        event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]["TypeOfShot"]
+        == SPORTEC_BODY_PART_RIGHT_LEG
+    ):
+        qualifiers.append(BodyPartQualifier(value=BodyPart.RIGHT_FOOT))
+    elif (
+        event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]["TypeOfShot"]
+        == SPORTEC_BODY_PART_HEAD
+    ):
+        qualifiers.append(BodyPartQualifier(value=BodyPart.HEAD))
+    elif (
+        event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]["TypeOfShot"]
+        == SPORTEC_BODY_PART_UPPER_BODY
+    ):
+        qualifiers.append(BodyPartQualifier(value=BodyPart.UPPER_BODY))
+    else:
+        raise Exception()
+
+    qualifiers.append(
+        CounterAttackQualifier(
+            value=event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]["CounterAttack"]
+            == "true"
+        )
+    )
     return qualifiers
 
 
@@ -155,10 +206,49 @@ def _parse_shot(event_name: str, event_chain: OrderedDict) -> Dict:
     else:
         raise ValueError(f"Unknown shot type {event_name}")
 
-    return dict(result=result, qualifiers=_get_event_qualifiers(event_chain))
+    qualifiers = _get_event_qualifiers(event_chain)
+    qualifiers.extend(_get_shot_qualifiers(event_chain))
+
+    extensions = {}
+    for key in [
+        "xG",
+        "DistanceToGoal",
+        "AngleToGoal",
+        "Pressure",
+        "PlayerSpeed",
+        "AmountOfDefenders",
+        "GoalDistanceGoalkeeper",
+    ]:
+        if key in event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]:
+            extensions[key] = float(
+                event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL][key]
+            )
+
+    for key in [
+        "AssistShotAtGoal",
+        "AssistTypeShotAtGoal",
+        "ShotCondition",
+        "TakerBallControl",
+        "TakerSetup",
+        "ChanceEvaluation",
+        "SitterContribution",
+        "BuildUp",
+        "SetupOrigin",
+        "AssistAction",
+    ]:
+        if key in event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]:
+            extensions[key] = event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL][key]
+
+    for key in ["InsideBox", "AfterFreeKick"]:
+        if key in event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL]:
+            extensions[key] = (
+                event_chain[SPORTEC_EVENT_NAME_SHOT_AT_GOAL][key] == "true"
+            )
+
+    return dict(result=result, qualifiers=qualifiers, extensions=extensions)
 
 
-def _parse_pass(event_chain: OrderedDict, team: Team) -> Dict:
+def _parse_pass(event_name: str, event_chain: OrderedDict, team: Team) -> Dict:
     if event_chain["Play"]["Evaluation"] in (
         "successfullyCompleted",
         "successful",
@@ -175,10 +265,31 @@ def _parse_pass(event_chain: OrderedDict, team: Team) -> Dict:
         result = PassResult.INCOMPLETE
         receiver_player = None
 
+    qualifiers = _get_event_qualifiers(event_chain)
+
+    if event_name == SPORTEC_EVENT_NAME_CROSS:
+        qualifiers.append(PassQualifier(value=PassType.CROSS))
+
+    extensions = {}
+    for key in ["FromOpenPlay", "Distance", "PlayOrigin", "Rotation"]:
+        if key in event_chain[SPORTEC_EVENT_NAME_PLAY]:
+            extensions[key] = event_chain[SPORTEC_EVENT_NAME_PLAY][key]
+
+    for key in ["SemiField", "FlatCross", "Height", "PenaltyBox"]:
+        if key in event_chain[SPORTEC_EVENT_NAME_PLAY]:
+            extensions[key] = (
+                event_chain[SPORTEC_EVENT_NAME_PLAY][key] == "true"
+            )
+
+    for key in ["PlayAngle"]:
+        if key in event_chain[SPORTEC_EVENT_NAME_PLAY]:
+            extensions[key] = float(event_chain[SPORTEC_EVENT_NAME_PLAY][key])
+
     return dict(
         result=result,
         receiver_player=receiver_player,
-        qualifiers=_get_event_qualifiers(event_chain),
+        qualifiers=qualifiers,
+        extensions=extensions,
     )
 
 
@@ -228,6 +339,13 @@ def _include_event(event: Event, wanted_event_types: List) -> bool:
     return not wanted_event_types or event.event_type in wanted_event_types
 
 
+class DefaultReader(Reader):
+    def read(self, inputs: Dict[str, Readable]) -> Tuple:
+        match_root = objectify.fromstring(inputs["match_data"].read())
+        event_root = objectify.fromstring(inputs["event_data"].read())
+        return match_root, event_root
+
+
 class SportecEventSerializer(EventDataSerializer):
     @staticmethod
     def __validate_inputs(inputs: Dict[str, Readable]):
@@ -243,9 +361,10 @@ class SportecEventSerializer(EventDataSerializer):
         if not options:
             options = {}
 
+        reader_class = options.get("reader_class", DefaultReader)
+
         with performance_logging("load data", logger=logger):
-            match_root = objectify.fromstring(inputs["match_data"].read())
-            event_root = objectify.fromstring(inputs["event_data"].read())
+            match_root, event_root = reader_class().read(inputs)
 
             wanted_event_types = [
                 EventType[event_type.upper()]
@@ -254,10 +373,14 @@ class SportecEventSerializer(EventDataSerializer):
 
         with performance_logging("parse data", logger=logger):
             x_max = float(
-                match_root.MatchInformation.Environment.attrib["PitchX"]
+                match_root.MatchInformation.Environment.attrib.get(
+                    "PitchX", DEFAULT_X_PITCH
+                )
             )
             y_max = float(
-                match_root.MatchInformation.Environment.attrib["PitchY"]
+                match_root.MatchInformation.Environment.attrib.get(
+                    "PitchY", DEFAULT_Y_PITCH
+                )
             )
 
             team_path = objectify.ObjectPath(
@@ -302,18 +425,18 @@ class SportecEventSerializer(EventDataSerializer):
                         end_timestamp=None,
                     )
                     if period_id == 1:
-                        team_left = event_chain[SPORTEC_EVENT_NAME_KICKOFF][
-                            "TeamLeft"
-                        ]
-                        if team_left == home_team.team_id:
+                        team_left = event_chain[
+                            SPORTEC_EVENT_NAME_KICKOFF
+                        ].get("TeamLeft")
+                        if team_left == home_team.team_id or team_left == None:
                             # goal of home team is on the left side.
                             # this means they attack from left to right
-                            orientation = Orientation.FIXED_HOME_AWAY
+                            orientation = Orientation.HOME_TEAM
                             period.set_attacking_direction(
                                 AttackingDirection.HOME_AWAY
                             )
                         else:
-                            orientation = Orientation.FIXED_AWAY_HOME
+                            orientation = Orientation.AWAY_TEAM
                             period.set_attacking_direction(
                                 AttackingDirection.AWAY_HOME
                             )
@@ -376,7 +499,9 @@ class SportecEventSerializer(EventDataSerializer):
                     )
                 elif event_name in SPORTEC_PASS_EVENT_NAMES:
                     pass_event_kwargs = _parse_pass(
-                        event_chain=event_chain, team=team
+                        event_name=event_name,
+                        event_chain=event_chain,
+                        team=team,
                     )
                     event = PassEvent.create(
                         **pass_event_kwargs,
@@ -430,10 +555,7 @@ class SportecEventSerializer(EventDataSerializer):
 
                 if events:
                     previous_event = events[-1]
-                    if (
-                        previous_event.event_type == EventType.PASS
-                        and previous_event.result == PassResult.COMPLETE
-                    ):
+                    if previous_event.event_type == EventType.PASS:
                         if "X-Source-Position" in event_chain["Event"]:
                             previous_event.receiver_coordinates = Point(
                                 x=float(

@@ -8,6 +8,7 @@ from .event import (
 from .tracking import (
     EPTSSerializer,
     MetricaTrackingSerializer,
+    SportecSerializer,
     TRACABSerializer,
     TrackingDataSerializer,
 )

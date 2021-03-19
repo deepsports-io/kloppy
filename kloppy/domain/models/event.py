@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Type, Union
+from typing import Any, Dict, List, Type, Union
 
 from kloppy.domain.models.common import DatasetType
 from kloppy.utils import camelcase_to_snakecase, removes_suffix
@@ -145,6 +145,7 @@ class BodyPart(Enum):
     RIGHT_FOOT = "RIGHT_FOOT"
     LEFT_FOOT = "LEFT_FOOT"
     HEAD = "HEAD"
+    UPPER_BODY = "UPPER_BODY"
 
 
 @dataclass
@@ -202,6 +203,10 @@ class Event(DataRecord, ABC):
                     return qualifier.value
         return None
 
+    @property
+    def extensions(self) -> Dict[str, Any]:
+        return None
+
 
 @dataclass
 class GenericEvent(Event):
@@ -213,6 +218,7 @@ class GenericEvent(Event):
 class ShotEvent(Event):
     result: ShotResult
     result_coordinates: Point = None
+    extensions: Dict[str, Any] = None
 
     event_type: EventType = EventType.SHOT
     event_name: str = "shot"
@@ -225,6 +231,8 @@ class PassEvent(Event):
     receiver_coordinates: Point
 
     result: PassResult
+
+    extensions: Dict[str, Any] = None
 
     event_type: EventType = EventType.PASS
     event_name: str = "pass"

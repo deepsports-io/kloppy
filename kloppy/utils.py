@@ -2,9 +2,9 @@ import re
 import time
 from contextlib import contextmanager
 from io import BytesIO
-from typing import BinaryIO, Union
+from typing import BinaryIO, Dict, Union
 
-Readable = Union[bytes, BinaryIO]
+Readable = Union[bytes, BinaryIO, Dict]
 
 
 def to_file_object(s: Readable) -> BinaryIO:

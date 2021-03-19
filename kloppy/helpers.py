@@ -188,7 +188,9 @@ def _frame_to_pandas_row_converter(frame: Frame) -> Dict:
     return row
 
 
-def _event_to_pandas_row_converter(event: Event) -> Dict:
+def _event_to_pandas_row_converter(
+    event: Event, all_passes: bool = False
+) -> Dict:
     row = dict(
         event_id=event.event_id,
         event_type=(
@@ -210,7 +212,12 @@ def _event_to_pandas_row_converter(event: Event) -> Dict:
         coordinates_x=event.coordinates.x if event.coordinates else None,
         coordinates_y=event.coordinates.y if event.coordinates else None,
     )
-    if isinstance(event, PassEvent) and event.result == PassResult.COMPLETE:
+    if event.extensions:
+        row.update(event.extensions)
+
+    if isinstance(event, PassEvent) and (
+        all_passes or event.result == PassResult.COMPLETE
+    ):
         row.update(
             {
                 "end_timestamp": event.receive_timestamp,
@@ -248,6 +255,7 @@ def _event_to_pandas_row_converter(event: Event) -> Dict:
                 else None,
             }
         )
+
     elif isinstance(event, CardEvent):
         row.update(
             {"card_type": event.card_type.value if event.card_type else None}
@@ -264,6 +272,7 @@ def to_pandas(
     dataset: Union[Dataset, List[DataRecord]],
     _record_converter: Callable = None,
     additional_columns: Dict = None,
+    **kwargs,
 ) -> "DataFrame":
     try:
         import pandas as pd
@@ -296,7 +305,7 @@ def to_pandas(
             raise Exception("Don't know how to convert rows")
 
     def generic_record_converter(record: Union[Frame, Event]):
-        row = _record_converter(record)
+        row = _record_converter(record, **kwargs)
         if additional_columns:
             for k, v in additional_columns.items():
                 if callable(v):

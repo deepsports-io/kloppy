@@ -10,7 +10,9 @@ from kloppy.domain import (
     CardType,
     CounterAttackQualifier,
     Dimension,
+    Event,
     EventDataset,
+    EventType,
     FoulCommittedEvent,
     GenericEvent,
     GoalkeeperAction,
@@ -36,10 +38,8 @@ from kloppy.domain import (
     TakeOnEvent,
     TakeOnResult,
     Team,
-    EventType,
-    Event,
 )
-from kloppy.infra.serializers.event import EventDataSerializer
+from kloppy.infra.serializers.event import EventDataSerializer, Reader
 from kloppy.utils import Readable, performance_logging
 
 from . import wyscout_events, wyscout_tags
@@ -87,7 +87,12 @@ def _generic_qualifiers(raw_event: Dict) -> List[Qualifier]:
     return qualifiers
 
 
-def _parse_shot(raw_event: Dict, next_event: Dict) -> Dict:
+def _parse_shot(
+    raw_event: Dict,
+    next_event: Dict,
+    event_id_field: str,
+    sub_event_id_field: str,
+) -> Dict:
     result = None
     qualifiers = _generic_qualifiers(raw_event)
     if _has_tag(raw_event, 101):
@@ -103,12 +108,12 @@ def _parse_shot(raw_event: Dict, next_event: Dict) -> Dict:
     elif any((_has_tag(raw_event, tag) for tag in wyscout_tags.SHOT_ON_GOAL)):
         result = ShotResult.SAVED
 
-    if next_event["eventName"] == wyscout_events.SAVE.EVENT:
-        if next_event["subEventName"] == wyscout_events.SAVE.REFLEXES:
+    if next_event and next_event[event_id_field] == wyscout_events.SAVE.EVENT:
+        if next_event[sub_event_id_field] == wyscout_events.SAVE.REFLEXES:
             qualifiers.append(
                 GoalkeeperActionQualifier(GoalkeeperAction.REFLEX)
             )
-        if next_event["subEventName"] == wyscout_events.SAVE.SAVE_ATTEMPT:
+        if next_event[sub_event_id_field] == wyscout_events.SAVE.SAVE_ATTEMPT:
             qualifiers.append(
                 GoalkeeperActionQualifier(GoalkeeperAction.SAVE_ATTEMPT)
             )
@@ -118,27 +123,31 @@ def _parse_shot(raw_event: Dict, next_event: Dict) -> Dict:
         "result_coordinates": Point(
             x=float(raw_event["positions"][1]["x"]),
             y=float(raw_event["positions"][1]["y"]),
-        ),
+        )
+        if len(raw_event["positions"]) >= 2
+        else None,
         "qualifiers": qualifiers,
     }
 
 
-def _pass_qualifiers(raw_event) -> List[Qualifier]:
+def _pass_qualifiers(
+    raw_event: Dict, sub_event_id_field: str
+) -> List[Qualifier]:
     qualifiers = _generic_qualifiers(raw_event)
 
-    if raw_event["subEventName"] == wyscout_events.PASS.CROSS:
+    if raw_event[sub_event_id_field] == wyscout_events.PASS.CROSS:
         qualifiers.append(PassQualifier(PassType.CROSS))
-    elif raw_event["subEventName"] == wyscout_events.PASS.HAND:
+    elif raw_event[sub_event_id_field] == wyscout_events.PASS.HAND:
         qualifiers.append(PassQualifier(PassType.HAND_PASS))
-    elif raw_event["subEventName"] == wyscout_events.PASS.HEAD:
+    elif raw_event[sub_event_id_field] == wyscout_events.PASS.HEAD:
         qualifiers.append(PassQualifier(PassType.HEAD_PASS))
-    elif raw_event["subEventName"] == wyscout_events.PASS.HIGH:
+    elif raw_event[sub_event_id_field] == wyscout_events.PASS.HIGH:
         qualifiers.append(PassQualifier(PassType.HIGH_PASS))
-    elif raw_event["subEventName"] == wyscout_events.PASS.LAUNCH:
+    elif raw_event[sub_event_id_field] == wyscout_events.PASS.LAUNCH:
         qualifiers.append(PassQualifier(PassType.LAUNCH))
-    elif raw_event["subEventName"] == wyscout_events.PASS.SIMPLE:
+    elif raw_event[sub_event_id_field] == wyscout_events.PASS.SIMPLE:
         qualifiers.append(PassQualifier(PassType.SIMPLE_PASS))
-    elif raw_event["subEventName"] == wyscout_events.PASS.SMART:
+    elif raw_event[sub_event_id_field] == wyscout_events.PASS.SMART:
         qualifiers.append(PassQualifier(PassType.SMART_PASS))
 
     if _has_tag(raw_event, wyscout_tags.LEFT_FOOT):
@@ -149,7 +158,12 @@ def _pass_qualifiers(raw_event) -> List[Qualifier]:
     return qualifiers
 
 
-def _parse_pass(raw_event: Dict, next_event: Dict) -> Dict:
+def _parse_pass(
+    raw_event: Dict,
+    next_event: Dict,
+    event_id_field: str,
+    sub_event_id_field: str,
+) -> Dict:
     pass_result = None
 
     if _has_tag(raw_event, wyscout_tags.ACCURATE):
@@ -158,24 +172,26 @@ def _parse_pass(raw_event: Dict, next_event: Dict) -> Dict:
         pass_result = PassResult.INCOMPLETE
 
     if next_event:
-        if next_event["eventName"] == wyscout_events.OFFSIDE.EVENT:
+        if next_event[event_id_field] == wyscout_events.OFFSIDE.EVENT:
             pass_result = PassResult.OFFSIDE
-        if next_event["eventName"] == wyscout_events.INTERRUPTION.EVENT:
+        if next_event[event_id_field] == wyscout_events.INTERRUPTION.EVENT:
             if (
-                next_event["subEventName"]
+                next_event[sub_event_id_field]
                 == wyscout_events.INTERRUPTION.BALL_OUT
             ):
                 pass_result = PassResult.OUT
 
     return {
         "result": pass_result,
-        "qualifiers": _pass_qualifiers(raw_event),
+        "qualifiers": _pass_qualifiers(raw_event, sub_event_id_field),
         "receive_timestamp": None,
         "receiver_player": None,
         "receiver_coordinates": Point(
             x=float(raw_event["positions"][1]["x"]),
             y=float(raw_event["positions"][1]["y"]),
-        ),
+        )
+        if len(raw_event["positions"]) >= 2
+        else None,
     }
 
 
@@ -213,33 +229,44 @@ def _parse_ball_out(raw_event: Dict) -> Dict:
     return {"result": None, "qualifiers": qualifiers}
 
 
-def _parse_set_piece(raw_event: Dict, next_event: Dict) -> Dict:
+def _parse_set_piece(
+    raw_event: Dict,
+    next_event: Dict,
+    event_id_field: str,
+    sub_event_id_field: str,
+) -> Dict:
     qualifiers = _generic_qualifiers(raw_event)
 
     result = {}
 
-    if raw_event["subEventName"] in wyscout_events.FREE_KICK.PASS_TYPES:
-        result = _parse_pass(raw_event, next_event)
-        if raw_event["subEventName"] == wyscout_events.FREE_KICK.GOAL_KICK:
+    if raw_event[sub_event_id_field] in wyscout_events.FREE_KICK.PASS_TYPES:
+        result = _parse_pass(
+            raw_event, next_event, event_id_field, sub_event_id_field
+        )
+        if raw_event[sub_event_id_field] == wyscout_events.FREE_KICK.GOAL_KICK:
             qualifiers.append(SetPieceQualifier(SetPieceType.GOAL_KICK))
-        elif raw_event["subEventName"] == wyscout_events.FREE_KICK.THROW_IN:
+        elif (
+            raw_event[sub_event_id_field] == wyscout_events.FREE_KICK.THROW_IN
+        ):
             qualifiers.append(SetPieceQualifier(SetPieceType.THROW_IN))
             qualifiers.append(PassQualifier(PassType.HAND_PASS))
-        elif raw_event["subEventName"] in [
+        elif raw_event[sub_event_id_field] in [
             wyscout_events.FREE_KICK.FREE_KICK,
             wyscout_events.FREE_KICK.FREE_KICK_CROSS,
         ]:
             qualifiers.append(SetPieceQualifier(SetPieceType.FREE_KICK))
-        elif raw_event["subEventName"] == wyscout_events.FREE_KICK.CORNER:
+        elif raw_event[sub_event_id_field] == wyscout_events.FREE_KICK.CORNER:
             qualifiers.append(SetPieceQualifier(SetPieceType.CORNER_KICK))
-    elif raw_event["subEventName"] in wyscout_events.FREE_KICK.SHOT_TYPES:
-        result = _parse_shot(raw_event, next_event)
+    elif raw_event[sub_event_id_field] in wyscout_events.FREE_KICK.SHOT_TYPES:
+        result = _parse_shot(
+            raw_event, next_event, event_id_field, sub_event_id_field
+        )
         if (
-            raw_event["subEventName"]
+            raw_event[sub_event_id_field]
             == wyscout_events.FREE_KICK.FREE_KICK_SHOT
         ):
             qualifiers.append(SetPieceQualifier(SetPieceType.FREE_KICK))
-        elif raw_event["subEventName"] == wyscout_events.FREE_KICK.PENALTY:
+        elif raw_event[sub_event_id_field] == wyscout_events.FREE_KICK.PENALTY:
             qualifiers.append(SetPieceQualifier(SetPieceType.PENALTY))
 
     result["qualifiers"] = qualifiers
@@ -265,6 +292,12 @@ def _include_event(event: Event, wanted_event_types: List) -> bool:
     return not wanted_event_types or event.event_type in wanted_event_types
 
 
+class DefaultReader(Reader):
+    def read(self, inputs: Dict[str, Readable]) -> Dict:
+        raw_events = json.load(inputs["event_data"])
+        return raw_events
+
+
 class WyscoutSerializer(EventDataSerializer):
     @staticmethod
     def __validate_inputs(inputs: Dict[str, Readable]):
@@ -283,8 +316,13 @@ class WyscoutSerializer(EventDataSerializer):
             for event_type in options.get("event_types", [])
         ]
 
+        reader_class = options.get("reader_class", DefaultReader)
+        event_id_field = options.get("eventId", "eventName")
+        sub_event_id_field = options.get("subEventId", "subEventName")
+
         with performance_logging("load data", logger=logger):
-            raw_events = json.load(inputs["event_data"])
+            reader = reader_class()
+            raw_events = reader.read(inputs)
 
         periods = []
 
@@ -340,17 +378,27 @@ class WyscoutSerializer(EventDataSerializer):
                 }
 
                 event = None
-                if raw_event["eventName"] == wyscout_events.SHOT.EVENT:
-                    shot_event_args = _parse_shot(raw_event, next_event)
+                if raw_event[event_id_field] == wyscout_events.SHOT.EVENT:
+                    shot_event_args = _parse_shot(
+                        raw_event,
+                        next_event,
+                        event_id_field,
+                        sub_event_id_field,
+                    )
                     event = ShotEvent.create(
                         **shot_event_args, **generic_event_args
                     )
-                elif raw_event["eventName"] == wyscout_events.PASS.EVENT:
-                    pass_event_args = _parse_pass(raw_event, next_event)
+                elif raw_event[event_id_field] == wyscout_events.PASS.EVENT:
+                    pass_event_args = _parse_pass(
+                        raw_event,
+                        next_event,
+                        event_id_field,
+                        sub_event_id_field,
+                    )
                     event = PassEvent.create(
                         **pass_event_args, **generic_event_args
                     )
-                elif raw_event["eventName"] == wyscout_events.FOUL.EVENT:
+                elif raw_event[event_id_field] == wyscout_events.FOUL.EVENT:
                     foul_event_args = _parse_foul(raw_event)
                     event = FoulCommittedEvent.create(
                         **foul_event_args, **generic_event_args
@@ -363,25 +411,31 @@ class WyscoutSerializer(EventDataSerializer):
                             **card_event_args, **generic_event_args
                         )
                 elif (
-                    raw_event["eventName"] == wyscout_events.INTERRUPTION.EVENT
+                    raw_event[event_id_field]
+                    == wyscout_events.INTERRUPTION.EVENT
                 ):
                     ball_out_event_args = _parse_ball_out(raw_event)
                     event = BallOutEvent.create(
                         **ball_out_event_args, **generic_event_args
                     )
-                elif raw_event["eventName"] == wyscout_events.FREE_KICK.EVENT:
+                elif (
+                    raw_event[event_id_field] == wyscout_events.FREE_KICK.EVENT
+                ):
                     set_piece_event_args = _parse_set_piece(
-                        raw_event, next_event
+                        raw_event,
+                        next_event,
+                        event_id_field,
+                        sub_event_id_field,
                     )
                     if (
-                        raw_event["subEventName"]
+                        raw_event[sub_event_id_field]
                         in wyscout_events.FREE_KICK.PASS_TYPES
                     ):
                         event = PassEvent.create(
                             **set_piece_event_args, **generic_event_args
                         )
                     elif (
-                        raw_event["subEventName"]
+                        raw_event[sub_event_id_field]
                         in wyscout_events.FREE_KICK.SHOT_TYPES
                     ):
                         event = ShotEvent.create(
@@ -389,19 +443,19 @@ class WyscoutSerializer(EventDataSerializer):
                         )
 
                 elif (
-                    raw_event["eventName"]
+                    raw_event[event_id_field]
                     == wyscout_events.OTHERS_ON_BALL.EVENT
                 ):
                     recovery_event_args = _parse_recovery(raw_event)
                     event = RecoveryEvent.create(
                         **recovery_event_args, **generic_event_args
                     )
-                elif raw_event["eventName"] == wyscout_events.DUEL.EVENT:
+                elif raw_event[event_id_field] == wyscout_events.DUEL.EVENT:
                     takeon_event_args = _parse_takeon(raw_event)
                     event = TakeOnEvent.create(
                         **takeon_event_args, **generic_event_args
                     )
-                elif raw_event["eventName"] not in [
+                elif raw_event[event_id_field] not in [
                     wyscout_events.SAVE.EVENT,
                     wyscout_events.OFFSIDE.EVENT,
                 ]:
